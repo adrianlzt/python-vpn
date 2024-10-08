@@ -1,6 +1,10 @@
-import hashlib, os, random, hmac
+import hashlib
+import os
+import random
+import hmac
 from Crypto.Cipher import AES, ChaCha20_Poly1305
 from . import enums
+
 
 class Prf:
     DIGESTS_1 = {
@@ -17,15 +21,19 @@ class Prf:
         enums.PrfId.PRF_HMAC_SHA2_384: (hashlib.sha384, 48),
         enums.PrfId.PRF_HMAC_SHA2_512: (hashlib.sha512, 64),
     }
+
     def __init__(self, transform):
         self.hasher, self.key_size = self.DIGESTS[transform] if type(transform) is enums.PrfId else self.DIGESTS_1[transform]
+
     def prf(self, key, data):
         return hmac.HMAC(key, data, digestmod=self.hasher).digest()
+
     def prfplus(self, key, seed, count=True):
         temp = bytes()
         for i in range(1, 1024):
             temp = self.prf(key, temp + seed + (bytes([i]) if count else b''))
             yield from temp
+
 
 class Integrity:
     DIGESTS_1 = {
@@ -44,28 +52,37 @@ class Integrity:
         enums.IntegId.AUTH_HMAC_SHA2_384_192: (hashlib.sha384, 48, 24),
         enums.IntegId.AUTH_HMAC_SHA2_512_256: (hashlib.sha512, 64, 32),
     }
+
     def __init__(self, transform):
         self.hasher, self.key_size, self.hash_size = self.DIGESTS[transform] if type(transform) is enums.IntegId else self.DIGESTS_1[transform]
+
     def compute(self, key, data):
         return hmac.HMAC(key, data, digestmod=self.hasher).digest()[:self.hash_size]
+
 
 class Cipher:
     def __init__(self, transform, keylen):
         assert type(transform) is enums.EncrId and transform == enums.EncrId.ENCR_AES_CBC or \
-               type(transform) is enums.EncrId_1 and transform == enums.EncrId_1.AES_CBC
+            type(transform) is enums.EncrId_1 and transform == enums.EncrId_1.AES_CBC
         self.keylen = keylen
+
     @property
     def block_size(self):
         return 16
+
     @property
     def key_size(self):
         return self.keylen // 8
+
     def encrypt(self, key, iv, data):
         return AES.new(key, AES.MODE_CBC, iv=iv).encrypt(data)
+
     def decrypt(self, key, iv, data):
         return AES.new(key, AES.MODE_CBC, iv=iv).decrypt(data)
+
     def generate_iv(self):
         return os.urandom(self.block_size)
+
 
 class Crypto:
     def __init__(self, cipher, sk_e, integrity=None, sk_a=None, prf=None, sk_p=None, *, iv=None):
@@ -78,6 +95,7 @@ class Crypto:
         self.iv = {0: iv}
         self.last_iv = None
         self.m_id = set()
+
     def decrypt_esp(self, encrypted):
         iv = encrypted[:self.cipher.block_size]
         ciphertext = encrypted[self.cipher.block_size:len(encrypted)-self.integrity.hash_size]
@@ -85,12 +103,14 @@ class Crypto:
         next_header = plain[-1]
         padlen = plain[-2]
         return next_header, plain[:-2-padlen]
+
     def encrypt_esp(self, next_header, plain):
         iv = self.cipher.generate_iv()
         padlen = self.cipher.block_size - ((len(plain)+1) % self.cipher.block_size) - 1
         plain += b'\x00' * padlen + bytes([padlen, next_header])
         encrypted = self.cipher.encrypt(self.sk_e, bytes(iv), bytes(plain))
         return iv + encrypted + bytes(self.integrity.hash_size)
+
     def encrypt_1(self, plain, m_id):
         if m_id not in self.iv:
             self.iv[m_id] = self.prf.hasher(self.iv[0]+m_id.to_bytes(4, 'big')).digest()[:self.cipher.block_size]
@@ -99,6 +119,7 @@ class Crypto:
         encrypted = self.cipher.encrypt(self.sk_e, self.iv[m_id], bytes(plain))
         self.iv[m_id] = encrypted[-self.cipher.block_size:]
         return encrypted
+
     def decrypt_1(self, encrypted, m_id):
         if m_id not in self.iv:
             self.iv[m_id] = self.prf.hasher(self.iv[0]+m_id.to_bytes(4, 'big')).digest()[:self.cipher.block_size]
@@ -107,30 +128,36 @@ class Crypto:
         padlen = plain[-1]
         # do not remove padding according to ios cisco ipsec bug
         return plain
+
     def decrypt(self, encrypted):
         iv = encrypted[:self.cipher.block_size]
         ciphertext = encrypted[self.cipher.block_size:len(encrypted)-self.integrity.hash_size]
         plain = self.cipher.decrypt(self.sk_e, bytes(iv), bytes(ciphertext))
         padlen = plain[-1]
         return plain[:-1-padlen]
+
     def encrypt(self, plain):
         iv = self.cipher.generate_iv()
         padlen = self.cipher.block_size - (len(plain) % self.cipher.block_size) - 1
         plain += b'\x00' * padlen + bytes([padlen])
         encrypted = self.cipher.encrypt(self.sk_e, bytes(iv), bytes(plain))
         return iv + encrypted + bytes(self.integrity.hash_size)
+
     def verify_checksum(self, encrypted):
         checksum = self.integrity.compute(self.sk_a, encrypted[:len(encrypted)-self.integrity.hash_size])
         assert checksum == encrypted[len(encrypted)-self.integrity.hash_size:]
+
     def add_checksum(self, encrypted):
         checksum = self.integrity.compute(self.sk_a, encrypted[:len(encrypted)-self.integrity.hash_size])
         encrypted[len(encrypted)-len(checksum):] = checksum
+
 
 def aead_chacha20poly1305_encrypt(key, counter, plain_text, auth_text):
     cipher = ChaCha20_Poly1305.new(key=key, nonce=b'\x00\x00\x00\x00'+counter.to_bytes(8, 'little'))
     cipher.update(auth_text)
     cipher_text, digest = cipher.encrypt_and_digest(plain_text)
     return cipher_text+digest
+
 
 def aead_chacha20poly1305_decrypt(key, counter, cipher_text, auth_text):
     cipher = ChaCha20_Poly1305.new(key=key, nonce=b'\x00\x00\x00\x00'+counter.to_bytes(8, 'little'))
@@ -139,34 +166,37 @@ def aead_chacha20poly1305_decrypt(key, counter, cipher_text, auth_text):
 
 # DH and ECDH algorithms
 
+
 def ec_add(P, Q, l, p, a):
     if P == 0:
         return Q
     if P == Q:
-        z = (3*(P>>l)*(P>>l)+a) * pow(2*(P&(1<<l)-1), p-2, p)
+        z = (3*(P >> l)*(P >> l)+a) * pow(2*(P & (1 << l)-1), p-2, p)
     else:
-        z = ((Q&(1<<l)-1) - (P&(1<<l)-1)) * pow((Q>>l)-(P>>l), p-2, p)
-    x = (z*z - (P>>l) - (Q>>l)) % p
-    return x<<l | (z*((P>>l)-x) - (P&(1<<l)-1)) % p
+        z = ((Q & (1 << l)-1) - (P & (1 << l)-1)) * pow((Q >> l)-(P >> l), p-2, p)
+    x = (z*z - (P >> l) - (Q >> l)) % p
+    return x << l | (z*((P >> l)-x) - (P & (1 << l)-1)) % p
+
 
 def ec_mul(P, l, i, p, a):
     r = 0
     while i > 0:
         if i & 1:
-            r = ec_add(r, P, l<<3, p, a)
-        i, P = i>>1, ec_add(P, P, l<<3, p, a)
+            r = ec_add(r, P, l << 3, p, a)
+        i, P = i >> 1, ec_add(P, P, l << 3, p, a)
     return r
+
 
 def ec_scalar(k, u, p, a24, bits):
     x_2, x_3, z_2, z_3, swap = 1, u, 0, 1, 0
     for t in range(bits-1, -1, -1):
         k_t = (k >> t) & 1
-        if swap^k_t:
+        if swap ^ k_t:
             x_2, x_3, z_2, z_3 = x_3, x_2, z_3, z_2
         swap = k_t
         A, B, C, D = x_2+z_2, x_2-z_2, x_3+z_3, x_3-z_3
         AA, BB, DA, CB = A*A, B*B, D*A, C*B
-        E   = AA - BB
+        E = AA - BB
         x_3 = pow(DA + CB, 2, p)
         z_3 = u * pow(DA - CB, 2, p) % p
         x_2 = AA * BB % p
@@ -175,15 +205,18 @@ def ec_scalar(k, u, p, a24, bits):
         x_2, x_3, z_2, z_3 = x_3, x_2, z_3, z_2
     return (x_2 * pow(z_2, p-2, p) % p)
 
+
 def X25519(k, u):
     u, k = int.from_bytes(u, 'little') if isinstance(u, bytes) else u, int.from_bytes(k, 'little')
     k = k & ((1 << 256) - (1 << 255) - 8) | (1 << 254)
     return ec_scalar(k, u, 2**255-19, 121665, 255).to_bytes(32, 'little')
 
+
 def X448(k, u):
     u, k = int.from_bytes(u, 'little') if isinstance(u, bytes) else u, int.from_bytes(k, 'little')
     k = k & (-4) | (1 << 447)
     return ec_scalar(k, u, 2**448-2**224-1, 39081, 448).to_bytes(56, 'little')
+
 
 PRIMES = {
     enums.DhId.DH_1: (0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A63A3620FFFFFFFFFFFFFFFF, 2, 96),
@@ -206,19 +239,19 @@ PRIMES = {
     enums.DhId.DH_28: (0xA9FB57DBA1EEA9BC3E660A909D838D726E3BF623D52620282013481D1F6E5377, (0x8BD2AEB9CB7E57CB2C4B482FFC81B7AFB9DE27E1E3BD23C23A4453BD9ACE3262547EF835C3DAC4FD97F8461A14611DC9C27745132DED8E545C1D54C72F046997, 0x7D5A0975FC2C3057EEF67530417AFFE7FB8055C126DC5C6CE94A4B44F330B5D9), 32),
     enums.DhId.DH_29: (0x8CB91E82A3386D280F5D6F7E50E641DF152F7109ED5456B412B1DA197FB71123ACD3A729901D1A71874700133107EC53, (0x1D1C64F068CF45FFA2A63A81B7C13F6B8847A3E77EF14FE3DB7FCAFE0CBD10E8E826E03436D646AAEF87B2E247D4AF1E8ABE1D7520F9C2A45CB1EB8E95CFD55262B70B29FEEC5864E19C054FF99129280E4646217791811142820341263C5315, 0x7BC382C63D8C150C3C72080ACE05AFA0C2BEA28E4FB22787139165EFBA91F90F8AA5814A503AD4EB04A8C7DD22CE2826), 48),
     enums.DhId.DH_30: (0xAADD9DB8DBE9C48B3FD4E6AE33C9FC07CB308DB3B3C9D20ED6639CCA703308717D4D9B009BC66842AECDA12AE6A380E62881FF2F2D82C68528AA6056583A48F3, (0x81AEE4BDD82ED9645A21322E9C4C6A9385ED9F70B5D916C1B43B62EEF4D0098EFF3B1F78E2D0D48D50D1687B93B97D5F7C6D5047406A5E688B352209BCB9F8227DDE385D566332ECC0EABFA9CF7822FDF209F70024A57B1AA000C55B881F8111B2DCDE494A5F485E5BCA4BD88A2763AED1CA2B2FA8F0540678CD1E0F3AD80892, 0x7830A3318B603B89E2327145AC234CC594CBDD8D3DF91610A83441CAEA9863BC2DED5D5AA8253AA10A2EF1C98B9AC8B57F1117A72BF2C7B9E7C1AC4D77FC94CA), 64),
-    enums.DhId.DH_31: (1<<32, X25519, 9),
-    enums.DhId.DH_32: (1<<56, X448, 5),
+    enums.DhId.DH_31: (1 << 32, X25519, 9),
+    enums.DhId.DH_32: (1 << 56, X448, 5),
 }
+
 
 def DiffieHellman(group, peer):
     if group not in PRIMES:
         raise Exception(f'Unsupported DH Group DH_{group}')
     p, g, l = PRIMES[group]
-    a = random.randrange(p>>8, p)
+    a = random.randrange(p >> 8, p)
     if callable(g):
         return g(a, l), g(a, peer)
     elif type(g) is tuple:
         return ec_mul(g[0], l, a, p, g[1]).to_bytes(l*2, 'big'), ec_mul(int.from_bytes(peer, 'big'), l, a, p, g[1]).to_bytes(l*2, 'big')[:l]
     else:
         return pow(g, a, p).to_bytes(l, 'big'), pow(int.from_bytes(peer, 'big'), a, p).to_bytes(l, 'big')
-
