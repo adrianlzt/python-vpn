@@ -1,4 +1,5 @@
 import struct
+import socket
 import ipaddress
 import os
 import asyncio
@@ -204,7 +205,7 @@ class TCPStack:
             if seq != self.dst_ack:
                 continue
             # retransmit
-            # print('retransmit', self.dst_ip, self.dst_port, self.dst_ack, self.dst_seq, len(self.dst_win_buf), self.rto, timeout)
+            print('retransmit', self.dst_ip, self.dst_port, self.dst_ack, self.dst_seq, len(self.dst_win_buf), self.rto, timeout)
             flag = None
             if self.dst_win:
                 self.dst_win[0][3] = 0
@@ -225,7 +226,7 @@ class TCPStack:
         tcp_body = ip_body[offset >> 2:]
         self.rwnd = window
         self.update = time.perf_counter()
-        # print('RECV', self.dst_name, self.dst_port, self.state, Control(flag), seq, ack, len(tcp_body))
+        print('RECV', self.dst_name, self.dst_port, self.state, Control(flag), seq, ack, len(tcp_body))
         if self.state == State.CLOSED:
             if flag & Control.RST:
                 pass
@@ -332,7 +333,8 @@ class TCPStack:
     def send(self, tcp_body=b'', *, flag=Control.ACK, seq=None, ack=None):
         self.update = time.perf_counter()
         window = max(0, (65535-len(self.writer.transport._buffer)) if self.writer else 0)
-        # print('SEND', self.dst_name, self.dst_port, self.state, Control(flag), (self.dst_seq if seq is None else seq), (self.src_seq if ack is None else ack), len(tcp_body))
+        print('SEND', self.dst_name, self.dst_port, self.state, Control(flag),
+              (self.dst_seq if seq is None else seq), (self.src_seq if ack is None else ack), len(tcp_body))
         tcp_header = struct.pack('>HHIIBBHHH', self.dst_port, self.src_port, (self.dst_seq if seq is None else seq) &
                                  0xffffffff, (self.src_seq if ack is None else ack) & 0xffffffff, 5 << 4, flag, window, 0, 0)
         ip_body = bytearray(tcp_header + tcp_body)
@@ -351,7 +353,8 @@ class TCPStack:
                 pass
 
     async def connect(self):
-        # print(f'connect {self.dst_ip}:{self.dst_port}')
+        print(f'connect {self.dst_ip}:{self.dst_port}')
+
         total = 0
         try:
             reader, self.writer = await self.tcp_conn.tcp_connect(self.dst_name, self.dst_port)
@@ -361,11 +364,13 @@ class TCPStack:
             self.wait_ack.set()
             self.send(flag=Control.RST)
             return
+
         self.send(flag=Control.ACK | Control.SYN)
         self.dst_win.append([self.dst_seq, 1, 1, time.perf_counter()])
         self.dst_win_buf.extend(bytes([Control.ACK | Control.SYN]))
         self.dst_seq += 1
         self.wait_ack.set()
+
         while True:
             try:
                 data = await reader.read(65536)
@@ -373,9 +378,11 @@ class TCPStack:
                 data = None
             if not data:
                 break
+
             self.logread(data)
-            # print(f'TCP READ {self.dst_name}:{self.dst_port} {data}')
+            print(f'TCP READ {self.dst_name}:{self.dst_port} {data}')
             data = bytearray(data)
+
             while data:
                 if self.dst_seq-self.dst_ack > min(self.cwnd, self.rwnd):
                     self.wait_send.clear()
@@ -390,6 +397,7 @@ class TCPStack:
                 self.dst_win_buf.extend(tcp_body)
                 self.dst_seq += len(tcp_body)
                 self.wait_ack.set()
+
         if self.state == State.CLOSE_WAIT:
             self.send(flag=Control.ACK | Control.FIN)
             self.dst_win_buf.extend(bytes([Control.ACK | Control.FIN]))
@@ -434,6 +442,8 @@ class IPPacket:
 
     def handle_ipv4(self, remote_id, data, reply):
         proto, src_ip, dst_ip, ip_body = parse_ipv4(data)
+        print(f'IP: proto={enums.IpProto(proto).name} {src_ip} -> {dst_ip} Length={len(ip_body)}')
+
         dst_name = self.dns_cache.ip2domain(str(dst_ip)) if self.dns_cache else str(dst_ip)
         if proto == enums.IpProto.UDP:
             src_port, dst_port, udp_body = parse_udp(ip_body)
@@ -461,8 +471,7 @@ class IPPacket:
                     record = dns.DNSRecord.unpack(udp_body)
                     self.dns_cache.answer(record) if self.dns_cache else None
                     if self.verbose:
-                        print(f'DNS {remote_id[0]}:{src_port}{option.logtext(dst_name, dst_port).replace(
-                            "->", "<-")} Answer=['+' '.join(f'{r.rname}->{r.rdata}' for r in record.rr)+']')
+                        print(f'DNS {remote_id[0]}:{src_port}{option.logtext(dst_name, dst_port).replace("->", "<-")} Answer=['+' '.join(f'{r.rname}->{r.rdata}' for r in record.rr)+']')
                 else:
                     if self.verbose:
                         print(f'UDP {remote_id[0]}:{src_port}{option.logtext(dst_name, dst_port).replace("->", "<-")} Length={len(udp_body)}')
@@ -470,6 +479,7 @@ class IPPacket:
                 data = make_ipv4(proto, dst_ip, src_ip, ip_body)
                 reply(data)
             asyncio.ensure_future(option.udp_sendto(dst_name, dst_port, udp_body, udp_reply, key))
+
         elif proto == enums.IpProto.TCP:
             src_port, dst_port, flag, tcp_body = parse_tcp(ip_body)
             key = (remote_id[0], remote_id[1], src_port)
@@ -478,13 +488,16 @@ class IPPacket:
                 if flag & Control.SYN == 0:
                     return
                 option = self.schedule(dst_name, dst_port) or self.DIRECT
-                print(f'TCP {remote_id[0]}:{src_port}{option.logtext(dst_name, dst_port)}')
+                print(f'TCP {src_ip}:{src_port}{option.logtext(dst_name, dst_port)}')
+
                 for spi, tcp in list(self.tcp_stack.items()):
                     if tcp.obsolete():
                         self.tcp_stack.pop(spi)
                 self.tcp_stack[key] = tcp = TCPStack(src_ip, src_port, dst_ip, dst_name, dst_port, reply, option, self.verbose)
-                # print(f'TCP Connections = {len(self.tcp_stack)}')
+                print(f'TCP Connections = {len(self.tcp_stack)}')
+
             tcp.parse(ip_body)
+
         elif proto == enums.IpProto.ICMP:
             icmptp, code, icmp_body = parse_icmp(ip_body)
             if icmptp == 0:
@@ -494,11 +507,12 @@ class IPPacket:
             elif icmptp == 8:
                 tid, seq = struct.unpack('>HH', ip_body[4:8])
                 if self.verbose:
-                    print(f'ECHO {remote_id[0]} -> {dst_name} Id={tid} Seq={seq} Data={icmp_body}')
+                    print(f'ECHO {src_ip} -> {dst_name} Id={tid} Seq={seq} Data={icmp_body}')
                 # NEED ROOT PRIVILEGE TO SEND ICMP PACKET
-                # a = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
-                # a.sendto(icmp_body, (dst_name, 1))
-                # a.close()
+                # Packet is sent with the source IP address of the server running this app
+                a = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
+                a.sendto(ip_body, (dst_name, 1))
+                a.close()
             elif icmptp == 3 and code == 3:
                 eproto, esrc_ip, edst_ip, eip_body = parse_ipv4(icmp_body)
                 eport = int.from_bytes(eip_body[2:4], 'big')
@@ -513,10 +527,10 @@ class IPPacket:
     def handle_l2tp(self, remote_id, data, reply):
         src_port, dst_port, udp_body = parse_udp(data)
         tunnel_id, session_id, ns, nr, l2tp_body = parse_l2tp(udp_body)
-        # print(tunnel_id, session_id, ns, nr, l2tp_body)
+        print(tunnel_id, session_id, ns, nr, l2tp_body)
 
         def reply_l2tp(l2tp_body):
-            # print('reply', l2tp_body)
+            print('reply', l2tp_body)
             ns_nr = type(l2tp_body) is dict
             udp_body = make_l2tp(tunnel_id, session_id, nr if ns_nr else None, ns+1 if ns_nr else None, l2tp_body)
             ip_body = make_udp(dst_port, src_port, udp_body)
