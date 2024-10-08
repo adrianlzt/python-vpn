@@ -292,6 +292,19 @@ class IKEv2Session:
                              self.my_nonce+self.peer_spi+self.my_spi)
         self.sk_d, sk_ai, sk_ar, sk_ei, sk_er, sk_pi, sk_pr = keymat_fmt.unpack(
             bytes(next(keymat) for _ in range(keymat_fmt.size)))
+
+        print('======== IKEv2 SETTING ========')
+        print('Data needed by Wireshark to decrypt IKEv2 packets:')
+        print(f'peer_spi: {self.peer_spi.hex()}')
+        print(f'my_spi: {self.my_spi.hex()}')
+        print(f'sk_ei: {sk_ei.hex()}')
+        print(f'sk_er: {sk_er.hex()}')
+        print(f'Encryption algorithm: {ike_proposal.get_transform(enums.Transform.ENCR)}')
+        print(f'sk_ai: {sk_ai.hex()}')
+        print(f'sk_ar: {sk_ar.hex()}')
+        print(f'Integrity algorithm: {ike_proposal.get_transform(enums.Transform.INTEG)}')
+        print('===================================')
+
         self.my_crypto = crypto.Crypto(cipher, sk_er, integ, sk_ar, prf, sk_pr)
         self.peer_crypto = crypto.Crypto(
             cipher, sk_ei, integ, sk_ai, prf, sk_pi)
@@ -332,8 +345,10 @@ class IKEv2Session:
             return
         elif request.message_id != self.peer_msgid:
             return
+
         request.parse_payloads(stream, crypto=self.peer_crypto)
         print(repr(request))
+
         if request.exchange == enums.Exchange.IKE_SA_INIT:
             assert self.state == State.INITIAL
             self.peer_nonce = request.get_payload(enums.Payload.NONCE).nonce
@@ -341,6 +356,7 @@ class IKEv2Session:
                 enums.Payload.SA).get_proposal(enums.EncrId.ENCR_AES_CBC)
             payload_ke = request.get_payload(enums.Payload.KE)
             prefered_dh = chosen_proposal.get_transform(enums.Transform.DH).id
+
             if payload_ke.dh_group != prefered_dh or payload_ke.ke_data[0] == 0:
                 reply(self.response(enums.Exchange.IKE_SA_INIT, [message.PayloadNOTIFY(
                     0, enums.Notify.INVALID_KE_PAYLOAD, b'', prefered_dh.to_bytes(2, 'big'))]))
@@ -358,7 +374,11 @@ class IKEv2Session:
             reply(self.response(enums.Exchange.IKE_SA_INIT, response_payloads))
             self.state = State.SA_SENT
             self.request_data = stream.getvalue()
+
         elif request.exchange == enums.Exchange.IKE_AUTH:
+            print(f'IKE_AUTH, traffic selector initiator: {request.get_payload(enums.Payload.TSi).traffic_selectors}')
+            print(f'IKE_AUTH, traffic selector responder: {request.get_payload(enums.Payload.TSr).traffic_selectors}')
+
             assert self.state == State.SA_SENT
             request_payload_idi = request.get_payload(enums.Payload.IDi)
             request_payload_auth = request.get_payload(enums.Payload.AUTH)
@@ -370,11 +390,13 @@ class IKEv2Session:
                 auth_data = self.auth_data(
                     self.request_data, self.my_nonce, request_payload_idi, self.peer_crypto.sk_p)
                 assert auth_data == request_payload_auth.auth_data, 'Authentication Failed'
+
             chosen_child_proposal = request.get_payload(
                 enums.Payload.SA).get_proposal(enums.EncrId.ENCR_AES_CBC)
             child_sa = self.create_child_key(
                 chosen_child_proposal, self.peer_nonce, self.my_nonce)
             chosen_child_proposal.spi = child_sa.spi_in
+
             response_payload_idr = message.PayloadIDr(
                 enums.IDType.ID_FQDN, f'{__title__}-{__version__}'.encode())
             auth_data = self.auth_data(
@@ -385,6 +407,7 @@ class IKEv2Session:
                                  request.get_payload(enums.Payload.TSr),
                                  response_payload_idr,
                                  message.PayloadAUTH(enums.AuthMethod.PSK, auth_data)]
+
             if request.get_payload(enums.Payload.CP):
                 attrs = {enums.CPAttrType.INTERNAL_IP4_ADDRESS: ipaddress.ip_address('1.0.0.1').packed,
                          enums.CPAttrType.INTERNAL_IP4_DNS: ipaddress.ip_address(self.args.dns).packed, }
@@ -393,6 +416,7 @@ class IKEv2Session:
             reply(self.response(enums.Exchange.IKE_AUTH,
                   response_payloads, crypto=self.my_crypto))
             self.state = State.ESTABLISHED
+
         elif request.exchange == enums.Exchange.INFORMATIONAL:
             assert self.state == State.ESTABLISHED
             response_payloads = []
@@ -429,8 +453,7 @@ class IKEv2Session:
                 payload_notify = request.get_payload_notify(
                     enums.Notify.REKEY_SA)
                 if not payload_notify:
-                    raise Exception(f'unhandled protocol {
-                                    chosen_proposal.protocol} {request!r}')
+                    raise Exception(f'unhandled protocol {chosen_proposal.protocol} {request!r}')
                 old_child_sa = next(
                     i for i in self.child_sa if i.spi_out == payload_notify.spi)
                 peer_nonce = request.get_payload(enums.Payload.NONCE).nonce
