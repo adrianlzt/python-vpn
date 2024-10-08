@@ -489,7 +489,7 @@ class PayloadVENDOR(Payload):
         return self.vendor
 
     def to_repr(self):
-        return f'{self.vendor.decode()}'
+        return f'{self.vendor}'
 
 
 class TrafficSelector:
